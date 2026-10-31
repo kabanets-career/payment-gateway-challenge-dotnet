@@ -1,4 +1,9 @@
+using FluentValidation;
+
+using PaymentGateway.Api.Models.Requests;
+using PaymentGateway.Api.Providers;
 using PaymentGateway.Api.Services;
+using PaymentGateway.Api.Validators;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -10,6 +15,9 @@ builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
 builder.Services.AddSingleton<PaymentsRepository>();
+builder.Services.AddSingleton<TimeProvider>(TimeProvider.System);
+builder.Services.AddSingleton<ICurrencyProvider, CurrencyProvider>();
+builder.Services.AddScoped<IValidator<PostPaymentRequest>, PostPaymentRequestValidator>();
 
 var app = builder.Build();
 
