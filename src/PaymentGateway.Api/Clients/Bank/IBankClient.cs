@@ -4,5 +4,5 @@ namespace PaymentGateway.Api.Clients.Bank;
 
 public interface IBankClient
 {
-    Task<Payment> ProcessPaymentAsync(ProcessPaymentCommand command, CancellationToken cancellationToken = default);
+    Task<BankPaymentResponse> ProcessPaymentAsync(ProcessPaymentCommand command, CancellationToken cancellationToken = default);
 }

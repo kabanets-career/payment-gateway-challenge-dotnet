@@ -8,7 +8,6 @@ public class GetPaymentResponseTests
     [Theory]
     [InlineData(PaymentStatus.Authorized)]
     [InlineData(PaymentStatus.Declined)]
-    [InlineData(PaymentStatus.Rejected)]
     public void MapsPaymentToResponse(PaymentStatus status)
     {
         var payment = new Payment

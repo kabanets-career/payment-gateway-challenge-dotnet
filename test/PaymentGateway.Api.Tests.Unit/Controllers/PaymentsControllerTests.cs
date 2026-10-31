@@ -5,6 +5,7 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.DependencyInjection;
 
+using PaymentGateway.Api.Clients.Bank.Exceptions;
 using PaymentGateway.Api.Controllers;
 using PaymentGateway.Api.Models;
 using PaymentGateway.Api.Models.Requests;
@@ -29,7 +30,8 @@ public class PaymentsControllerTests
             new ValidationFailure(nameof(PostPaymentRequest.CardNumber), "Another card number error."),
             new ValidationFailure(nameof(PostPaymentRequest.Currency), "Currency is unsupported.")
         }));
-        var controller = new PaymentsController(new StubPaymentService(), validator)
+        var service = new StubPaymentService();
+        var controller = new PaymentsController(service, validator)
         {
             ControllerContext = new ControllerContext
             {
@@ -49,20 +51,85 @@ public class PaymentsControllerTests
         Assert.Equal(new[] { "Currency is unsupported." },
             problem.Errors[nameof(PostPaymentRequest.Currency)]);
         Assert.Same(request, validator.ValidatedRequest);
+        Assert.Null(service.ReceivedCommand);
+    }
+
+    [Theory]
+    [InlineData(PaymentStatus.Authorized)]
+    [InlineData(PaymentStatus.Declined)]
+    public async Task ReturnsCreatedPaymentWhenValidationSucceeds(PaymentStatus status)
+    {
+        var request = CreateRequest();
+        var payment = new Payment
+        {
+            Id = Guid.NewGuid(),
+            Status = status,
+            AuthorizationCode = "AUTH-123",
+            CardNumberLastFour = "0042",
+            ExpiryMonth = request.ExpiryMonth,
+            ExpiryYear = request.ExpiryYear,
+            Currency = request.Currency!,
+            Amount = request.Amount!.Value
+        };
+        var service = new StubPaymentService(payment);
+        var validator = new StubValidator(new ValidationResult());
+        var controller = new PaymentsController(service, validator);
+        using var cancellation = new CancellationTokenSource();
+
+        var result = await controller.PostPaymentAsync(request, cancellation.Token);
+
+        var created = Assert.IsType<CreatedAtActionResult>(result);
+        Assert.Equal(StatusCodes.Status201Created, created.StatusCode);
+        Assert.Equal(nameof(PaymentsController.GetPayment), created.ActionName);
+        Assert.Equal(payment.Id, created.RouteValues!["id"]);
+        Assert.Equal(PostPaymentResponse.ToResponse(payment), Assert.IsType<PostPaymentResponse>(created.Value));
+        Assert.Same(request, validator.ValidatedRequest);
+        Assert.Equal(request.ToCommand(), service.ReceivedCommand);
+        Assert.Equal(cancellation.Token, service.CancellationToken);
     }
 
     [Fact]
-    public async Task ReturnsNoContentWhenValidationSucceeds()
+    public async Task ReturnsBadGatewayProblemWhenBankIsUnavailable()
     {
-        var request = new PostPaymentRequest();
-        var validator = new StubValidator(new ValidationResult());
-        var controller = new PaymentsController(new StubPaymentService(), validator);
+        var service = new StubPaymentService { Failure = new BankUnavailableException("Internal bank details") };
+        var controller = new PaymentsController(service, new StubValidator(new ValidationResult()));
 
-        var result = await controller.PostPaymentAsync(request, CancellationToken.None);
+        var result = await controller.PostPaymentAsync(CreateRequest(), CancellationToken.None);
 
-        var noContent = Assert.IsType<NoContentResult>(result);
-        Assert.Equal(StatusCodes.Status204NoContent, noContent.StatusCode);
-        Assert.Same(request, validator.ValidatedRequest);
+        var error = Assert.IsType<ObjectResult>(result);
+        Assert.Equal(StatusCodes.Status502BadGateway, error.StatusCode);
+        var problem = Assert.IsType<ProblemDetails>(error.Value);
+        Assert.Equal(StatusCodes.Status502BadGateway, problem.Status);
+        Assert.Equal("Payment processing unavailable", problem.Title);
+        Assert.Equal("Unable to determine payment authorization outcome.", problem.Detail);
+    }
+
+    [Fact]
+    public async Task ReturnsInternalServerErrorProblemWhenProcessingFailsUnexpectedly()
+    {
+        var service = new StubPaymentService { Failure = new InvalidOperationException("Sensitive internal details") };
+        var controller = new PaymentsController(service, new StubValidator(new ValidationResult()));
+
+        var result = await controller.PostPaymentAsync(CreateRequest(), CancellationToken.None);
+
+        var error = Assert.IsType<ObjectResult>(result);
+        Assert.Equal(StatusCodes.Status500InternalServerError, error.StatusCode);
+        var problem = Assert.IsType<ProblemDetails>(error.Value);
+        Assert.Equal(StatusCodes.Status500InternalServerError, problem.Status);
+        Assert.Equal("Payment processing failed", problem.Title);
+        Assert.Equal("An unexpected error occurred while processing the payment.", problem.Detail);
+    }
+
+    [Fact]
+    public async Task PropagatesCancellationWhenCallerCancels()
+    {
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        var service = new StubPaymentService { Failure = new OperationCanceledException(cancellation.Token) };
+        var controller = new PaymentsController(service, new StubValidator(new ValidationResult()));
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            controller.PostPaymentAsync(CreateRequest(), cancellation.Token));
     }
 
     [Fact]
@@ -111,6 +178,16 @@ public class PaymentsControllerTests
         Assert.Equal(id, service.RequestedId);
     }
 
+    private static PostPaymentRequest CreateRequest() => new()
+    {
+        CardNumber = "2222405343240042",
+        ExpiryMonth = 9,
+        ExpiryYear = 2030,
+        Currency = "GBP",
+        Amount = 1050,
+        Cvv = "123"
+    };
+
     private sealed class StubPaymentService : IPaymentService
     {
         private readonly Payment? _payment;
@@ -121,6 +198,16 @@ public class PaymentsControllerTests
         }
 
         public Guid? RequestedId { get; private set; }
+        public ProcessPaymentCommand? ReceivedCommand { get; private set; }
+        public CancellationToken CancellationToken { get; private set; }
+        public Exception? Failure { get; init; }
+
+        public Task<Payment> ProcessAsync(ProcessPaymentCommand command, CancellationToken cancellationToken = default)
+        {
+            ReceivedCommand = command;
+            CancellationToken = cancellationToken;
+            return Failure is not null ? Task.FromException<Payment>(Failure) : Task.FromResult(_payment!);
+        }
 
         public Payment? Get(Guid id)
         {

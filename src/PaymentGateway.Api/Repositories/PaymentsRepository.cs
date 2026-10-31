@@ -10,7 +10,10 @@ public class PaymentsRepository : IPaymentsRepository
     
     public void Add(Payment payment)
     {
-        _payments.TryAdd(payment.Id, payment);
+        if (!_payments.TryAdd(payment.Id, payment))
+        {
+            throw new InvalidOperationException("A payment with this ID already exists.");
+        }
     }
 
     public Payment? Get(Guid id)

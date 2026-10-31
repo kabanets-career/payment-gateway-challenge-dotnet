@@ -1,7 +1,8 @@
-﻿using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Mvc;
 
 using FluentValidation;
 
+using PaymentGateway.Api.Clients.Bank.Exceptions;
 using PaymentGateway.Api.Models.Requests;
 using PaymentGateway.Api.Models.Responses;
 using PaymentGateway.Api.Services;
@@ -24,25 +25,45 @@ public class PaymentsController : Controller
     }
 
     [HttpPost]
-    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(typeof(PostPaymentResponse), StatusCodes.Status201Created)]
     [ProducesResponseType(typeof(ValidationProblemDetails), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status502BadGateway)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status500InternalServerError)]
     public async Task<IActionResult> PostPaymentAsync(
         [FromBody] PostPaymentRequest request,
         CancellationToken cancellationToken)
     {
-        var validationResult = await _postPaymentRequestValidator.ValidateAsync(request, cancellationToken);
-
-        if (!validationResult.IsValid)
+        try
         {
-            foreach (var error in validationResult.Errors)
+            var validationResult = await _postPaymentRequestValidator.ValidateAsync(request, cancellationToken);
+
+            if (!validationResult.IsValid)
             {
-                ModelState.AddModelError(error.PropertyName, error.ErrorMessage);
+                foreach (var error in validationResult.Errors)
+                {
+                    ModelState.AddModelError(error.PropertyName, error.ErrorMessage);
+                }
+
+                return ValidationProblem(ModelState);
             }
 
-            return ValidationProblem(ModelState);
+            var payment = await _paymentService.ProcessAsync(request.ToCommand(), cancellationToken);
+            return CreatedAtAction(nameof(GetPayment), new { id = payment.Id }, PostPaymentResponse.ToResponse(payment));
         }
-
-        return NoContent();
+        catch (BankUnavailableException)
+        {
+            return Problem(
+                statusCode: StatusCodes.Status502BadGateway,
+                title: "Payment processing unavailable",
+                detail: "Unable to determine payment authorization outcome.");
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+        {
+            return Problem(
+                statusCode: StatusCodes.Status500InternalServerError,
+                title: "Payment processing failed",
+                detail: "An unexpected error occurred while processing the payment.");
+        }
     }
 
     [HttpGet("{id:guid}")]

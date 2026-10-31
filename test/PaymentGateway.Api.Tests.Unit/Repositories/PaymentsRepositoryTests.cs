@@ -20,6 +20,20 @@ public class PaymentsRepositoryTests
     }
 
     [Fact]
+    public void RejectsDuplicateIdAndPreservesOriginalPayment()
+    {
+        IPaymentsRepository repository = new PaymentsRepository();
+        var original = new Payment { Id = Guid.NewGuid(), AuthorizationCode = "AUTH-123" };
+        repository.Add(original);
+        var duplicate = new Payment { Id = original.Id, AuthorizationCode = "AUTH-456" };
+
+        var exception = Assert.Throws<InvalidOperationException>(() => repository.Add(duplicate));
+
+        Assert.Equal("A payment with this ID already exists.", exception.Message);
+        Assert.Same(original, repository.Get(original.Id));
+    }
+
+    [Fact]
     public void ReturnsNullForUnknownPayment()
     {
         IPaymentsRepository repository = new PaymentsRepository();

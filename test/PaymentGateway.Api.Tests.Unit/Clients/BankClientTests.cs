@@ -14,7 +14,7 @@ public class BankClientTests
 {
     [Theory]
     [InlineData(4, "04/2030", 100)]
-    [InlineData(11, "11/2030", 0)]
+    [InlineData(11, "11/2030", 1)]
     public async Task PostsBankRequestToConfiguredUrl(int expiryMonth, string expiryDate, int amount)
     {
         const string paymentsUrl = "https://configured-bank.example/payments";
@@ -46,10 +46,9 @@ public class BankClientTests
     }
 
     [Theory]
-    [InlineData(true, "0bb07405-6d44-4b50-a14f-7ae0beff13ad", PaymentStatus.Authorized)]
-    [InlineData(false, "", PaymentStatus.Declined)]
-    public async Task MapsBankResponseAndCommandToPayment(
-        bool authorized, string authorizationCode, PaymentStatus expectedStatus)
+    [InlineData(true, "0bb07405-6d44-4b50-a14f-7ae0beff13ad")]
+    [InlineData(false, "")]
+    public async Task ReturnsDeserializedBankResponse(bool authorized, string authorizationCode)
     {
         var request = CreateRequest();
         var responseJson = JsonSerializer.Serialize(new
@@ -61,16 +60,10 @@ public class BankClientTests
             Task.FromResult(JsonResponse(responseJson)));
         IBankClient client = new BankClient(new StubHttpClientFactory(handler), CreateConfiguration());
 
-        Payment payment = await client.ProcessPaymentAsync(request);
+        BankPaymentResponse response = await client.ProcessPaymentAsync(request);
 
-        Assert.NotEqual(Guid.Empty, payment.Id);
-        Assert.Equal(expectedStatus, payment.Status);
-        Assert.Equal(authorizationCode, payment.AuthorizationCode);
-        Assert.Equal("0042", payment.CardNumberLastFour);
-        Assert.Equal(request.ExpiryMonth, payment.ExpiryMonth);
-        Assert.Equal(request.ExpiryYear, payment.ExpiryYear);
-        Assert.Equal(request.Currency, payment.Currency);
-        Assert.Equal(request.Amount, payment.Amount);
+        Assert.Equal(authorized, response.Authorized);
+        Assert.Equal(authorizationCode, response.AuthorizationCode);
     }
 
     [Theory]
@@ -95,7 +88,7 @@ public class BankClientTests
     [Theory]
     [InlineData(HttpStatusCode.BadRequest)]
     [InlineData(HttpStatusCode.InternalServerError)]
-    public async Task ThrowsHttpRequestExceptionWithStatusCodeWhenBankReturnsError(HttpStatusCode statusCode)
+    public async Task WrapsHttpErrorsAsBankUnavailable(HttpStatusCode statusCode)
     {
         using var handler = new StubHttpMessageHandler((_, _) => Task.FromResult(
             new HttpResponseMessage(statusCode)
@@ -104,22 +97,70 @@ public class BankClientTests
             }));
         var client = new BankClient(new StubHttpClientFactory(handler), CreateConfiguration());
 
-        var exception = await Assert.ThrowsAsync<HttpRequestException>(() =>
+        var exception = await Assert.ThrowsAsync<BankUnavailableException>(() =>
             client.ProcessPaymentAsync(CreateRequest()));
 
-        Assert.Equal(statusCode, exception.StatusCode);
+        Assert.Equal(statusCode, Assert.IsType<HttpRequestException>(exception.InnerException).StatusCode);
         Assert.Equal(1, handler.RequestCount);
     }
 
-    [Fact]
-    public async Task ThrowsWhenBankResponseIsNull()
+    [Theory]
+    [InlineData("null")]
+    [InlineData("")]
+    [InlineData("not json")]
+    [InlineData("{}")]
+    [InlineData("{\"authorization_code\":\"AUTH-123\"}")]
+    [InlineData("{\"authorized\":null}")]
+    [InlineData("{\"authorized\":\"false\"}")]
+    [InlineData("{\"authorized\":true}")]
+    [InlineData("{\"authorized\":true,\"authorization_code\":null}")]
+    [InlineData("{\"authorized\":true,\"authorization_code\":\"\"}")]
+    [InlineData("{\"authorized\":true,\"authorization_code\":\"   \"}")]
+    public async Task RejectsMalformedSuccessfulBankResponses(string body)
     {
         using var handler = new StubHttpMessageHandler((_, _) =>
-            Task.FromResult(JsonResponse("null")));
+            Task.FromResult(JsonResponse(body)));
         var client = new BankClient(new StubHttpClientFactory(handler), CreateConfiguration());
 
-        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+        await Assert.ThrowsAsync<BankUnavailableException>(() =>
             client.ProcessPaymentAsync(CreateRequest()));
+    }
+
+    [Fact]
+    public async Task AcceptsExplicitDeclineWithoutAuthorizationCode()
+    {
+        using var handler = new StubHttpMessageHandler((_, _) =>
+            Task.FromResult(JsonResponse("""{"authorized":false}""")));
+        var client = new BankClient(new StubHttpClientFactory(handler), CreateConfiguration());
+
+        var response = await client.ProcessPaymentAsync(CreateRequest());
+
+        Assert.False(response.Authorized);
+    }
+
+    [Theory]
+    [InlineData("connection")]
+    [InlineData("read")]
+    [InlineData("timeout")]
+    public async Task WrapsCommunicationFailuresAndPreservesTheCause(string failureKind)
+    {
+        Exception failure = failureKind switch
+        {
+            "connection" => new HttpRequestException("Connection failed."),
+            "read" => new IOException("Response stream failed."),
+            _ => new TaskCanceledException("Bank timed out.", new TimeoutException())
+        };
+        using var handler = new StubHttpMessageHandler((_, _) =>
+            Task.FromException<HttpResponseMessage>(failure));
+        var client = new BankClient(new StubHttpClientFactory(handler), CreateConfiguration());
+        using var cancellation = new CancellationTokenSource();
+
+        var exception = await Assert.ThrowsAsync<BankUnavailableException>(() =>
+            client.ProcessPaymentAsync(CreateRequest(), cancellation.Token));
+
+        Assert.Same(failure, exception.InnerException);
+        Assert.False(cancellation.IsCancellationRequested);
+        Assert.Equal(1, handler.RequestCount);
     }
 
     [Fact]
