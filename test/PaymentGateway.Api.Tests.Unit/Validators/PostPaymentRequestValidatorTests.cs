@@ -45,8 +45,7 @@ public class PostPaymentRequestValidatorTests
     [InlineData("12345678901234\n")]
     public void RejectsInvalidCardNumbers(string? cardNumber)
     {
-        var request = CreateValidRequest();
-        request.CardNumber = cardNumber;
+        var request = CreateValidRequest(cardNumber: cardNumber);
 
         CreateValidator().TestValidate(request)
             .ShouldHaveValidationErrorFor(payment => payment.CardNumber).Only();
@@ -58,8 +57,7 @@ public class PostPaymentRequestValidatorTests
     [InlineData("1234567890123456789")]
     public void AcceptsNumericCardNumbersAtLengthBoundaries(string cardNumber)
     {
-        var request = CreateValidRequest();
-        request.CardNumber = cardNumber;
+        var request = CreateValidRequest(cardNumber: cardNumber);
 
         CreateValidator().TestValidate(request).ShouldNotHaveAnyValidationErrors();
     }
@@ -71,8 +69,7 @@ public class PostPaymentRequestValidatorTests
     [InlineData(int.MaxValue)]
     public void RejectsInvalidExpiryMonths(int month)
     {
-        var request = CreateValidRequest();
-        request.ExpiryMonth = month;
+        var request = CreateValidRequest(expiryMonth: month);
 
         CreateValidator().TestValidate(request)
             .ShouldHaveValidationErrorFor(payment => payment.ExpiryMonth);
@@ -84,9 +81,7 @@ public class PostPaymentRequestValidatorTests
     [InlineData(2029)]
     public void RejectsMissingOrPastExpiryYears(int year)
     {
-        var request = CreateValidRequest();
-        request.ExpiryMonth = 12;
-        request.ExpiryYear = year;
+        var request = CreateValidRequest(expiryMonth: 12, expiryYear: year);
 
         CreateValidator().TestValidate(request)
             .ShouldHaveValidationErrorFor(payment => payment.ExpiryYear);
@@ -97,9 +92,7 @@ public class PostPaymentRequestValidatorTests
     [InlineData(10)]
     public void RejectsPastAndCurrentMonthsInTheCurrentYear(int month)
     {
-        var request = CreateValidRequest();
-        request.ExpiryMonth = month;
-        request.ExpiryYear = 2030;
+        var request = CreateValidRequest(expiryMonth: month, expiryYear: 2030);
 
         CreateValidator().TestValidate(request)
             .ShouldHaveValidationErrorFor(payment => payment.ExpiryYear).Only();
@@ -112,9 +105,7 @@ public class PostPaymentRequestValidatorTests
     [InlineData(12, 2031)]
     public void AcceptsFutureExpiryMonthAndYearCombinations(int month, int year)
     {
-        var request = CreateValidRequest();
-        request.ExpiryMonth = month;
-        request.ExpiryYear = year;
+        var request = CreateValidRequest(expiryMonth: month, expiryYear: year);
 
         CreateValidator().TestValidate(request).ShouldNotHaveAnyValidationErrors();
     }
@@ -123,9 +114,7 @@ public class PostPaymentRequestValidatorTests
     public void AcceptsJanuaryOfNextYearInDecember()
     {
         _timeProvider.UtcNow = new DateTimeOffset(2030, 12, 31, 23, 59, 59, TimeSpan.Zero);
-        var request = CreateValidRequest();
-        request.ExpiryMonth = 1;
-        request.ExpiryYear = 2031;
+        var request = CreateValidRequest(expiryMonth: 1, expiryYear: 2031);
 
         CreateValidator().TestValidate(request).ShouldNotHaveAnyValidationErrors();
     }
@@ -134,9 +123,7 @@ public class PostPaymentRequestValidatorTests
     public void EvaluatesTheCurrentDateOnEachValidation()
     {
         var validator = CreateValidator();
-        var request = CreateValidRequest();
-        request.ExpiryMonth = 11;
-        request.ExpiryYear = 2030;
+        var request = CreateValidRequest(expiryMonth: 11, expiryYear: 2030);
 
         validator.TestValidate(request).ShouldNotHaveAnyValidationErrors();
 
@@ -155,8 +142,7 @@ public class PostPaymentRequestValidatorTests
     [InlineData("AAA\n")]
     public void RejectsMissingOrMalformedCurrencies(string? currency)
     {
-        var request = CreateValidRequest();
-        request.Currency = currency;
+        var request = CreateValidRequest(currency: currency);
 
         CreateValidator().TestValidate(request)
             .ShouldHaveValidationErrorFor(payment => payment.Currency).Only();
@@ -169,8 +155,7 @@ public class PostPaymentRequestValidatorTests
 
         foreach (var currency in _currencyProvider.SupportedCurrencies)
         {
-            var request = CreateValidRequest();
-            request.Currency = currency;
+            var request = CreateValidRequest(currency: currency);
 
             validator.TestValidate(request).ShouldNotHaveAnyValidationErrors();
         }
@@ -179,8 +164,7 @@ public class PostPaymentRequestValidatorTests
     [Fact]
     public void RejectsCurrenciesNotSuppliedByTheProvider()
     {
-        var request = CreateValidRequest();
-        request.Currency = "ZZZ";
+        var request = CreateValidRequest(currency: "ZZZ");
 
         CreateValidator().TestValidate(request)
             .ShouldHaveValidationErrorFor(request => request.Currency)
@@ -191,8 +175,7 @@ public class PostPaymentRequestValidatorTests
     [Fact]
     public void RejectsCurrenciesWithDifferentCasingFromTheProvider()
     {
-        var request = CreateValidRequest();
-        request.Currency = request.Currency!.ToLowerInvariant();
+        var request = CreateValidRequest(currency: _currencyProvider.SupportedCurrencies.First().ToLowerInvariant());
 
         CreateValidator().TestValidate(request)
             .ShouldHaveValidationErrorFor(payment => payment.Currency).Only();
@@ -201,8 +184,7 @@ public class PostPaymentRequestValidatorTests
     [Fact]
     public void RejectsMissingAmount()
     {
-        var request = CreateValidRequest();
-        request.Amount = null;
+        var request = CreateValidRequest(amount: null);
 
         CreateValidator().TestValidate(request)
             .ShouldHaveValidationErrorFor(payment => payment.Amount).Only();
@@ -217,8 +199,7 @@ public class PostPaymentRequestValidatorTests
     [InlineData(int.MaxValue)]
     public void AcceptsIntegerAmountsWithoutAnAdditionalRangeRestriction(int amount)
     {
-        var request = CreateValidRequest();
-        request.Amount = amount;
+        var request = CreateValidRequest(amount: amount);
 
         CreateValidator().TestValidate(request).ShouldNotHaveAnyValidationErrors();
     }
@@ -243,8 +224,7 @@ public class PostPaymentRequestValidatorTests
     [InlineData("123\n")]
     public void RejectsInvalidCvvs(string? cvv)
     {
-        var request = CreateValidRequest();
-        request.Cvv = cvv;
+        var request = CreateValidRequest(cvv: cvv);
 
         CreateValidator().TestValidate(request)
             .ShouldHaveValidationErrorFor(payment => payment.Cvv).Only();
@@ -257,22 +237,27 @@ public class PostPaymentRequestValidatorTests
     [InlineData("0000")]
     public void AcceptsThreeOrFourDigitCvvsIncludingLeadingZeroes(string cvv)
     {
-        var request = CreateValidRequest();
-        request.Cvv = cvv;
+        var request = CreateValidRequest(cvv: cvv);
 
         CreateValidator().TestValidate(request).ShouldNotHaveAnyValidationErrors();
     }
 
     private PostPaymentRequestValidator CreateValidator() => new(_timeProvider, _currencyProvider);
 
-    private PostPaymentRequest CreateValidRequest() => new()
+    private static PostPaymentRequest CreateValidRequest(
+        string? cardNumber = "1234567890123456",
+        int expiryMonth = 1,
+        int expiryYear = 2031,
+        string? currency = "AAA",
+        int? amount = 1050,
+        string? cvv = "012") => new()
     {
-        CardNumber = "1234567890123456",
-        ExpiryMonth = 1,
-        ExpiryYear = 2031,
-        Currency = _currencyProvider.SupportedCurrencies.First(),
-        Amount = 1050,
-        Cvv = "012"
+        CardNumber = cardNumber,
+        ExpiryMonth = expiryMonth,
+        ExpiryYear = expiryYear,
+        Currency = currency,
+        Amount = amount,
+        Cvv = cvv
     };
 
     private sealed class TestCurrencyProvider : ICurrencyProvider

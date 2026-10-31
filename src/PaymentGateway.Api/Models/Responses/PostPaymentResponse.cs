@@ -1,12 +1,26 @@
-﻿namespace PaymentGateway.Api.Models.Responses;
+namespace PaymentGateway.Api.Models.Responses;
 
-public class PostPaymentResponse
+public sealed record PostPaymentResponse
 {
-    public Guid Id { get; set; }
-    public PaymentStatus Status { get; set; }
-    public int CardNumberLastFour { get; set; }
-    public int ExpiryMonth { get; set; }
-    public int ExpiryYear { get; set; }
-    public string Currency { get; set; }
-    public int Amount { get; set; }
+    public Guid Id { get; init; }
+    public PaymentStatus Status { get; init; }
+    public string CardNumberLastFour { get; init; }
+    public int ExpiryMonth { get; init; }
+    public int ExpiryYear { get; init; }
+    public string Currency { get; init; }
+    public int Amount { get; init; }
+
+    public static PostPaymentResponse ToResponse(Payment payment)
+    {
+        return new PostPaymentResponse
+        {
+            Id = payment.Id,
+            Status = payment.Status,
+            CardNumberLastFour = payment.CardNumberLastFour,
+            ExpiryMonth = payment.ExpiryMonth,
+            ExpiryYear = payment.ExpiryYear,
+            Currency = payment.Currency,
+            Amount = payment.Amount
+        };
+    }
 }

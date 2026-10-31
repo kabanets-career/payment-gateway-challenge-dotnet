@@ -1,5 +1,6 @@
 using FluentValidation;
 
+using PaymentGateway.Api.Clients.Bank;
 using PaymentGateway.Api.Models.Requests;
 using PaymentGateway.Api.Providers;
 using PaymentGateway.Api.Repositories;
@@ -15,6 +16,8 @@ builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
+builder.Services.AddHttpClient();
+builder.Services.AddScoped<IBankClient, BankClient>();
 builder.Services.AddSingleton<IPaymentsRepository, PaymentsRepository>();
 builder.Services.AddScoped<IPaymentService, PaymentService>();
 builder.Services.AddSingleton<TimeProvider>(TimeProvider.System);
