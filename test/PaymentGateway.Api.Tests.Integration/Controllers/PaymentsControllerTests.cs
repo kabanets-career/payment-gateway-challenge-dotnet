@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Http.Json;
 using System.Text;
@@ -23,7 +24,50 @@ public class PaymentsControllerTests
 {
     private static WebApplicationFactory<PaymentsController> CreateApplicationFactory() =>
         new WebApplicationFactory<PaymentsController>().WithWebHostBuilder(builder =>
-            builder.ConfigureLogging(logging => logging.ClearProviders()));
+        {
+            builder.ConfigureLogging(logging => logging.ClearProviders());
+            builder.ConfigureServices(services => services.AddSingleton<TimeProvider>(new TestTimeProvider()));
+        });
+
+    [Theory]
+    [InlineData(HttpStatusCode.OK)]
+    [InlineData(HttpStatusCode.ServiceUnavailable)]
+    public async Task ApplicationLogsIncludeRequestTraceScopes(HttpStatusCode bankStatus)
+    {
+        const string traceId = "0123456789abcdef0123456789abcdef";
+        using var bankHandler = new StubBankHandler(bankStatus, authorized: true);
+        using var logs = new ScopeRecordingLoggerProvider();
+        using var factory = CreateApplicationFactoryWithBank(bankHandler).WithWebHostBuilder(builder =>
+            builder.ConfigureLogging(logging => logging
+                .AddProvider(logs)
+                .AddFilter("PaymentGateway.Api.Clients.Bank.BankClient", LogLevel.Debug)));
+        using var client = factory.CreateClient();
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/api/Payments")
+        {
+            Content = JsonContent.Create(CreateRequest())
+        };
+        request.Headers.Add("traceparent", $"00-{traceId}-0123456789abcdef-01");
+
+        using var response = await client.SendAsync(request);
+
+        Assert.Equal(bankStatus == HttpStatusCode.OK ? HttpStatusCode.Created : HttpStatusCode.BadGateway,
+            response.StatusCode);
+        var entries = logs.Entries.ToArray();
+        Assert.Equal(bankStatus == HttpStatusCode.OK ? 2 : 1, entries.Length);
+        Assert.All(entries, entry =>
+        {
+            Assert.Equal(traceId, entry.Scopes["TraceId"]);
+            var spanId = Assert.IsType<string>(entry.Scopes["SpanId"]);
+            Assert.Equal(16, spanId.Length);
+            Assert.NotEqual("0000000000000000", spanId);
+        });
+        Assert.Single(entries.Select(entry => entry.Scopes["SpanId"]).Distinct());
+        if (bankStatus == HttpStatusCode.ServiceUnavailable)
+        {
+            Assert.Equal(LogLevel.Warning, Assert.Single(entries).Level);
+        }
+
+    }
 
     [Theory]
     [InlineData(PaymentStatus.Authorized, "Authorized")]
@@ -193,11 +237,14 @@ public class PaymentsControllerTests
         using var factory = CreateApplicationFactory().WithWebHostBuilder(builder =>
         {
             builder.ConfigureAppConfiguration((_, configuration) => configuration.AddInMemoryCollection(
-                new Dictionary<string, string?> { ["Bank:PaymentsUrl"] = paymentsUrl }));
+                new Dictionary<string, string?>
+                {
+                    ["Bank:PaymentsUrl"] = paymentsUrl,
+                    ["Bank:TimeoutSeconds"] = "1"
+                }));
             builder.ConfigureServices(services =>
             {
                 services.AddSingleton<IPaymentsRepository>(repository);
-                services.AddHttpClient(string.Empty, client => client.Timeout = TimeSpan.FromSeconds(1));
             });
         });
         using var client = factory.CreateClient();
@@ -213,10 +260,9 @@ public class PaymentsControllerTests
     }
 
     [Theory]
-    [InlineData(0)]
-    [InlineData(-1)]
-    [InlineData(int.MinValue)]
-    public async Task AllowsNonPositiveAmountsAndPassesThemToBank(int amount)
+    [InlineData(1)]
+    [InlineData(1050)]
+    public async Task AcceptsPositiveAmountsAndPassesThemToBank(int amount)
     {
         using var bankHandler = new StubBankHandler(HttpStatusCode.OK);
         using var factory = CreateApplicationFactoryWithBank(bankHandler);
@@ -232,6 +278,60 @@ public class PaymentsControllerTests
         Assert.Equal(1, bankHandler.RequestCount);
         using var bankRequest = JsonDocument.Parse(bankHandler.RequestBody!);
         Assert.Equal(amount, bankRequest.RootElement.GetProperty("amount").GetInt32());
+    }
+
+    [Theory]
+    [InlineData("Amount", null)]
+    [InlineData("Amount", -1)]
+    [InlineData("Amount", 0)]
+    [InlineData("ExpiryMonth", null)]
+    [InlineData("ExpiryYear", null)]
+    [InlineData("ExpiryMonth", 0)]
+    [InlineData("ExpiryMonth", 13)]
+    [InlineData("ExpiryYear", 99999)]
+    [InlineData("ExpiryMonth", 8)]
+    public async Task RejectsInvalidFieldsWithoutCallingBankOrPersisting(string field, int? value)
+    {
+        using var bankHandler = new StubBankHandler(HttpStatusCode.OK);
+        var repository = new RecordingPaymentsRepository();
+        using var factory = CreateApplicationFactoryWithBank(bankHandler).WithWebHostBuilder(builder =>
+            builder.ConfigureServices(services => services.AddSingleton<IPaymentsRepository>(repository)));
+        using var client = factory.CreateClient();
+        var request = field switch
+        {
+            "Amount" => CreateRequest() with { Amount = value },
+            "ExpiryMonth" => CreateRequest() with { ExpiryMonth = value },
+            _ => CreateRequest() with { ExpiryYear = value }
+        };
+
+        using var response = await client.PostAsJsonAsync("/api/Payments", request);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        var problem = Assert.IsType<ValidationProblemDetails>(
+            await response.Content.ReadFromJsonAsync<ValidationProblemDetails>());
+        var expectedField = field == "ExpiryMonth" && value == 8 ? "ExpiryYear" : field;
+        Assert.Single(problem.Errors);
+        Assert.Single(problem.Errors[expectedField]);
+        Assert.Equal(0, bankHandler.RequestCount);
+        Assert.Empty(repository.AddedPayments);
+    }
+
+    [Theory]
+    [InlineData("Bank:PaymentsUrl", "not-a-url")]
+    [InlineData("Bank:PaymentsUrl", "ftp://bank.example/payments")]
+    [InlineData("Bank:TimeoutSeconds", "0")]
+    [InlineData("Bank:TimeoutSeconds", "-1")]
+    [InlineData("Bank:TimeoutSeconds", "NaN")]
+    [InlineData("Bank:TimeoutSeconds", "2147484")]
+    public void RejectsInvalidBankConfigurationAtStartup(string key, string value)
+    {
+        using var factory = CreateApplicationFactory().WithWebHostBuilder(builder =>
+            builder.ConfigureAppConfiguration((_, configuration) => configuration.AddInMemoryCollection(
+                new Dictionary<string, string?> { [key] = value })));
+
+        var exception = Assert.Throws<InvalidOperationException>(() => factory.CreateClient());
+
+        Assert.Contains(key, exception.Message);
     }
 
     [Fact]
@@ -277,6 +377,53 @@ public class PaymentsControllerTests
         public void Add(Payment payment) => AddedPayments.Add(payment);
 
         public Payment? Get(Guid id) => AddedPayments.SingleOrDefault(payment => payment.Id == id);
+    }
+
+    private sealed class TestTimeProvider : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow() => new(2030, 8, 15, 12, 0, 0, TimeSpan.Zero);
+    }
+
+    private sealed class ScopeRecordingLoggerProvider : ILoggerProvider, ISupportExternalScope
+    {
+        private IExternalScopeProvider _scopes = new LoggerExternalScopeProvider();
+
+        public ConcurrentQueue<(LogLevel Level, Dictionary<string, object?> Scopes)> Entries { get; } = new();
+
+        public ILogger CreateLogger(string categoryName) => new ScopeRecordingLogger(categoryName, this);
+
+        public void SetScopeProvider(IExternalScopeProvider scopeProvider) => _scopes = scopeProvider;
+
+        public void Dispose() { }
+
+        private sealed class ScopeRecordingLogger(string category, ScopeRecordingLoggerProvider provider) : ILogger
+        {
+            public IDisposable? BeginScope<TState>(TState state) where TState : notnull => provider._scopes.Push(state);
+
+            public bool IsEnabled(LogLevel logLevel) => true;
+
+            public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception,
+                Func<TState, Exception?, string> formatter)
+            {
+                if (!category.StartsWith("PaymentGateway.Api.", StringComparison.Ordinal))
+                {
+                    return;
+                }
+
+                var properties = new Dictionary<string, object?>();
+                provider._scopes.ForEachScope((scope, values) =>
+                {
+                    if (scope is IEnumerable<KeyValuePair<string, object?>> scopeProperties)
+                    {
+                        foreach (var property in scopeProperties)
+                        {
+                            values[property.Key] = property.Value;
+                        }
+                    }
+                }, properties);
+                provider.Entries.Enqueue((logLevel, properties));
+            }
+        }
     }
 
     private static WebApplicationFactory<PaymentsController> CreateApplicationFactoryWithBank(HttpMessageHandler handler) =>

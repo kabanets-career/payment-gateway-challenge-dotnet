@@ -1,4 +1,6 @@
+using System.Diagnostics;
 using System.Globalization;
+using System.Net;
 using System.Text.Json;
 
 using PaymentGateway.Api.Clients.Bank.Exceptions;
@@ -10,10 +12,13 @@ public class BankClient : IBankClient
 {
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly string _paymentsUrl;
+    private readonly ILogger<BankClient> _logger;
 
-    public BankClient(IHttpClientFactory httpClientFactory, IConfiguration configuration)
+    public BankClient(
+        IHttpClientFactory httpClientFactory, IConfiguration configuration, ILogger<BankClient> logger)
     {
         _httpClientFactory = httpClientFactory;
+        _logger = logger;
         _paymentsUrl = configuration["Bank:PaymentsUrl"]
             ?? throw new InvalidOperationException("Bank:PaymentsUrl must be configured.");
     }
@@ -30,10 +35,13 @@ public class BankClient : IBankClient
             Cvv = command.Cvv
         };
 
+        var stopwatch = Stopwatch.StartNew();
+        HttpStatusCode? statusCode = null;
         try
         {
             using var client = _httpClientFactory.CreateClient();
             using var response = await client.PostAsJsonAsync(_paymentsUrl, bankRequest, cancellationToken);
+            statusCode = response.StatusCode;
             response.EnsureSuccessStatusCode();
 
             var bankResponse = await response.Content.ReadFromJsonAsync<BankPaymentResponse>(cancellationToken)
@@ -44,23 +52,45 @@ public class BankClient : IBankClient
                 throw new BankUnavailableException("The bank returned an authorization without an authorization code.");
             }
 
+            _logger.LogDebug(
+                "Bank request completed: {StatusCode} in {DurationMs} ms",
+                (int)response.StatusCode, stopwatch.ElapsedMilliseconds);
+
             return bankResponse;
         }
-        catch (HttpRequestException exception)
+        catch (Exception exception) when (
+            exception is HttpRequestException or IOException or JsonException or BankUnavailableException
+            || (exception is OperationCanceledException && !cancellationToken.IsCancellationRequested))
         {
-            throw new BankUnavailableException("The bank is unavailable.", exception);
-        }
-        catch (IOException exception)
-        {
-            throw new BankUnavailableException("Unable to read the bank response.", exception);
-        }
-        catch (JsonException exception)
-        {
-            throw new BankUnavailableException("The bank returned an invalid payment response.", exception);
-        }
-        catch (OperationCanceledException exception) when (!cancellationToken.IsCancellationRequested)
-        {
-            throw new BankUnavailableException("The bank request timed out.", exception);
+            statusCode ??= (exception as HttpRequestException)?.StatusCode;
+            var category = exception switch
+            {
+                HttpRequestException when statusCode == HttpStatusCode.ServiceUnavailable => "Unavailable",
+                HttpRequestException when statusCode.HasValue => "HttpError",
+                HttpRequestException => "Network",
+                OperationCanceledException => "Timeout",
+                IOException => "ReadError",
+                _ => "InvalidResponse"
+            };
+            var level = category is "Unavailable" or "Network" or "Timeout" ? LogLevel.Warning : LogLevel.Error;
+
+            // Exception messages and bank response bodies can contain sensitive payment data.
+            _logger.Log(level, "Bank request failed: {FailureCategory} {StatusCode} in {DurationMs} ms",
+                category, (int?)statusCode, stopwatch.ElapsedMilliseconds);
+
+            if (exception is BankUnavailableException)
+            {
+                throw;
+            }
+
+            var message = exception switch
+            {
+                OperationCanceledException => "The bank request timed out.",
+                IOException => "Unable to read the bank response.",
+                JsonException => "The bank returned an invalid payment response.",
+                _ => "The bank is unavailable."
+            };
+            throw new BankUnavailableException(message, exception);
         }
     }
 }

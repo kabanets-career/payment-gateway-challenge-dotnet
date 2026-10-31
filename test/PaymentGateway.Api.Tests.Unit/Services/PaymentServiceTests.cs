@@ -1,8 +1,12 @@
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
+
 using PaymentGateway.Api.Clients.Bank;
 using PaymentGateway.Api.Clients.Bank.Exceptions;
 using PaymentGateway.Api.Models;
 using PaymentGateway.Api.Repositories;
 using PaymentGateway.Api.Services;
+using PaymentGateway.Api.Tests.Unit.Logging;
 
 namespace PaymentGateway.Api.Tests.Unit.Services;
 
@@ -25,7 +29,7 @@ public class PaymentServiceTests
             Amount = 1050
         };
         var repository = new StubPaymentsRepository(payment);
-        var service = new PaymentService(repository, new StubBankClient());
+        var service = new PaymentService(repository, new StubBankClient(), NullLogger<PaymentService>.Instance);
 
         var result = service.Get(payment.Id);
 
@@ -38,7 +42,7 @@ public class PaymentServiceTests
     {
         var id = Guid.NewGuid();
         var repository = new StubPaymentsRepository();
-        var service = new PaymentService(repository, new StubBankClient());
+        var service = new PaymentService(repository, new StubBankClient(), NullLogger<PaymentService>.Instance);
 
         var result = service.Get(id);
 
@@ -59,6 +63,7 @@ public class PaymentServiceTests
             AuthorizationCode = authorizationCode
         };
         var repository = new StubPaymentsRepository();
+        var logger = new TestLogger<PaymentService>();
         using var cancellation = new CancellationTokenSource();
         var bankClient = new StubBankClient((receivedCommand, token) =>
         {
@@ -67,7 +72,7 @@ public class PaymentServiceTests
             Assert.Empty(repository.AddedPayments);
             return Task.FromResult(bankResponse);
         });
-        IPaymentService service = new PaymentService(repository, bankClient);
+        IPaymentService service = new PaymentService(repository, bankClient, logger);
 
         var result = await service.ProcessAsync(command, cancellation.Token);
 
@@ -81,6 +86,14 @@ public class PaymentServiceTests
         Assert.Equal(command.Amount, result.Amount);
         Assert.Same(result, Assert.Single(repository.AddedPayments));
         Assert.Equal(1, bankClient.RequestCount);
+        var entry = Assert.Single(logger.Entries);
+        Assert.Equal(LogLevel.Information, entry.Level);
+        Assert.Null(entry.Exception);
+        Assert.Equal(result.Id, entry.Properties["PaymentId"]);
+        Assert.Equal(expectedStatus, entry.Properties["PaymentStatus"]);
+        Assert.Equal(command.Currency, entry.Properties["Currency"]);
+        Assert.DoesNotContain(command.CardNumber, entry.Message);
+        Assert.DoesNotContain(authorizationCode.Length > 0 ? authorizationCode : "AUTH-123", entry.Message);
     }
 
     [Theory]
@@ -93,13 +106,15 @@ public class PaymentServiceTests
             : new InvalidOperationException("Unexpected bank failure.");
         var bankClient = new StubBankClient((_, _) => Task.FromException<BankPaymentResponse>(failure));
         var repository = new StubPaymentsRepository();
-        var service = new PaymentService(repository, bankClient);
+        var logger = new TestLogger<PaymentService>();
+        var service = new PaymentService(repository, bankClient, logger);
 
         var exception = await Assert.ThrowsAnyAsync<Exception>(() => service.ProcessAsync(CreateCommand()));
 
         Assert.Same(failure, exception);
         Assert.Empty(repository.AddedPayments);
         Assert.Equal(1, bankClient.RequestCount);
+        Assert.Empty(logger.Entries);
     }
 
     [Fact]
@@ -109,7 +124,7 @@ public class PaymentServiceTests
         cancellation.Cancel();
         var bankClient = new StubBankClient((_, token) => Task.FromCanceled<BankPaymentResponse>(token));
         var repository = new StubPaymentsRepository();
-        var service = new PaymentService(repository, bankClient);
+        var service = new PaymentService(repository, bankClient, NullLogger<PaymentService>.Instance);
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
             service.ProcessAsync(CreateCommand(), cancellation.Token));
@@ -124,12 +139,14 @@ public class PaymentServiceTests
         var bankClient = new StubBankClient((_, _) => Task.FromResult(bankResponse));
         var failure = new InvalidOperationException("Unable to persist payment.");
         var repository = new StubPaymentsRepository { AddFailure = failure };
-        var service = new PaymentService(repository, bankClient);
+        var logger = new TestLogger<PaymentService>();
+        var service = new PaymentService(repository, bankClient, logger);
 
         var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => service.ProcessAsync(CreateCommand()));
 
         Assert.Same(failure, exception);
         Assert.Equal(1, bankClient.RequestCount);
+        Assert.Empty(logger.Entries);
     }
 
     private static ProcessPaymentCommand CreateCommand() => new()

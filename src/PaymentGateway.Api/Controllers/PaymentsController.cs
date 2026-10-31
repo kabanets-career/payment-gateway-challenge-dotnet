@@ -15,13 +15,16 @@ public class PaymentsController : Controller
 {
     private readonly IPaymentService _paymentService;
     private readonly IValidator<PostPaymentRequest> _postPaymentRequestValidator;
+    private readonly ILogger<PaymentsController> _logger;
 
     public PaymentsController(
         IPaymentService paymentService,
-        IValidator<PostPaymentRequest> postPaymentRequestValidator)
+        IValidator<PostPaymentRequest> postPaymentRequestValidator,
+        ILogger<PaymentsController> logger)
     {
         _paymentService = paymentService;
         _postPaymentRequestValidator = postPaymentRequestValidator;
+        _logger = logger;
     }
 
     [HttpPost]
@@ -59,6 +62,7 @@ public class PaymentsController : Controller
         }
         catch (Exception exception) when (exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
         {
+            _logger.LogError(exception, "Unexpected error processing payment");
             return Problem(
                 statusCode: StatusCodes.Status500InternalServerError,
                 title: "Payment processing failed",

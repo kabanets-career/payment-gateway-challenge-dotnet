@@ -4,6 +4,8 @@ using FluentValidation.Results;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 
 using PaymentGateway.Api.Clients.Bank.Exceptions;
 using PaymentGateway.Api.Controllers;
@@ -11,6 +13,7 @@ using PaymentGateway.Api.Models;
 using PaymentGateway.Api.Models.Requests;
 using PaymentGateway.Api.Models.Responses;
 using PaymentGateway.Api.Services;
+using PaymentGateway.Api.Tests.Unit.Logging;
 
 namespace PaymentGateway.Api.Tests.Unit.Controllers;
 
@@ -31,7 +34,8 @@ public class PaymentsControllerTests
             new ValidationFailure(nameof(PostPaymentRequest.Currency), "Currency is unsupported.")
         }));
         var service = new StubPaymentService();
-        var controller = new PaymentsController(service, validator)
+        var logger = new TestLogger<PaymentsController>();
+        var controller = new PaymentsController(service, validator, logger)
         {
             ControllerContext = new ControllerContext
             {
@@ -52,6 +56,7 @@ public class PaymentsControllerTests
             problem.Errors[nameof(PostPaymentRequest.Currency)]);
         Assert.Same(request, validator.ValidatedRequest);
         Assert.Null(service.ReceivedCommand);
+        Assert.Empty(logger.Entries);
     }
 
     [Theory]
@@ -66,14 +71,14 @@ public class PaymentsControllerTests
             Status = status,
             AuthorizationCode = "AUTH-123",
             CardNumberLastFour = "0042",
-            ExpiryMonth = request.ExpiryMonth,
-            ExpiryYear = request.ExpiryYear,
+            ExpiryMonth = request.ExpiryMonth!.Value,
+            ExpiryYear = request.ExpiryYear!.Value,
             Currency = request.Currency!,
             Amount = request.Amount!.Value
         };
         var service = new StubPaymentService(payment);
         var validator = new StubValidator(new ValidationResult());
-        var controller = new PaymentsController(service, validator);
+        var controller = new PaymentsController(service, validator, NullLogger<PaymentsController>.Instance);
         using var cancellation = new CancellationTokenSource();
 
         var result = await controller.PostPaymentAsync(request, cancellation.Token);
@@ -92,7 +97,8 @@ public class PaymentsControllerTests
     public async Task ReturnsBadGatewayProblemWhenBankIsUnavailable()
     {
         var service = new StubPaymentService { Failure = new BankUnavailableException("Internal bank details") };
-        var controller = new PaymentsController(service, new StubValidator(new ValidationResult()));
+        var logger = new TestLogger<PaymentsController>();
+        var controller = new PaymentsController(service, new StubValidator(new ValidationResult()), logger);
 
         var result = await controller.PostPaymentAsync(CreateRequest(), CancellationToken.None);
 
@@ -102,13 +108,15 @@ public class PaymentsControllerTests
         Assert.Equal(StatusCodes.Status502BadGateway, problem.Status);
         Assert.Equal("Payment processing unavailable", problem.Title);
         Assert.Equal("Unable to determine payment authorization outcome.", problem.Detail);
+        Assert.Empty(logger.Entries);
     }
 
     [Fact]
     public async Task ReturnsInternalServerErrorProblemWhenProcessingFailsUnexpectedly()
     {
         var service = new StubPaymentService { Failure = new InvalidOperationException("Sensitive internal details") };
-        var controller = new PaymentsController(service, new StubValidator(new ValidationResult()));
+        var logger = new TestLogger<PaymentsController>();
+        var controller = new PaymentsController(service, new StubValidator(new ValidationResult()), logger);
 
         var result = await controller.PostPaymentAsync(CreateRequest(), CancellationToken.None);
 
@@ -118,6 +126,12 @@ public class PaymentsControllerTests
         Assert.Equal(StatusCodes.Status500InternalServerError, problem.Status);
         Assert.Equal("Payment processing failed", problem.Title);
         Assert.Equal("An unexpected error occurred while processing the payment.", problem.Detail);
+        var entry = Assert.Single(logger.Entries);
+        Assert.Equal(LogLevel.Error, entry.Level);
+        Assert.Same(service.Failure, entry.Exception);
+        Assert.Equal(new[] { "{OriginalFormat}" }, entry.Properties.Keys);
+        Assert.DoesNotContain("Sensitive internal details", entry.Message);
+        Assert.DoesNotContain(CreateRequest().CardNumber!, entry.Message);
     }
 
     [Fact]
@@ -126,10 +140,13 @@ public class PaymentsControllerTests
         using var cancellation = new CancellationTokenSource();
         cancellation.Cancel();
         var service = new StubPaymentService { Failure = new OperationCanceledException(cancellation.Token) };
-        var controller = new PaymentsController(service, new StubValidator(new ValidationResult()));
+        var logger = new TestLogger<PaymentsController>();
+        var controller = new PaymentsController(service, new StubValidator(new ValidationResult()), logger);
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
             controller.PostPaymentAsync(CreateRequest(), cancellation.Token));
+
+        Assert.Empty(logger.Entries);
     }
 
     [Fact]
@@ -147,7 +164,7 @@ public class PaymentsControllerTests
             Amount = 1050
         };
         var service = new StubPaymentService(payment);
-        var controller = new PaymentsController(service, new StubValidator(new ValidationResult()));
+        var controller = new PaymentsController(service, new StubValidator(new ValidationResult()), NullLogger<PaymentsController>.Instance);
 
         var result = controller.GetPayment(payment.Id);
 
@@ -169,7 +186,7 @@ public class PaymentsControllerTests
     {
         var id = Guid.NewGuid();
         var service = new StubPaymentService();
-        var controller = new PaymentsController(service, new StubValidator(new ValidationResult()));
+        var controller = new PaymentsController(service, new StubValidator(new ValidationResult()), NullLogger<PaymentsController>.Instance);
 
         var result = controller.GetPayment(id);
 

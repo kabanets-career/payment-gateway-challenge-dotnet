@@ -8,11 +8,14 @@ public class PaymentService : IPaymentService
 {
     private readonly IPaymentsRepository _paymentsRepository;
     private readonly IBankClient _bankClient;
+    private readonly ILogger<PaymentService> _logger;
 
-    public PaymentService(IPaymentsRepository paymentsRepository, IBankClient bankClient)
+    public PaymentService(
+        IPaymentsRepository paymentsRepository, IBankClient bankClient, ILogger<PaymentService> logger)
     {
         _paymentsRepository = paymentsRepository;
         _bankClient = bankClient;
+        _logger = logger;
     }
 
     public async Task<Payment> ProcessAsync(
@@ -32,6 +35,9 @@ public class PaymentService : IPaymentService
         };
 
         _paymentsRepository.Add(payment);
+        _logger.LogInformation(
+            "Payment processed: {PaymentId} {PaymentStatus} {Currency}",
+            payment.Id, payment.Status, payment.Currency);
         return payment;
     }
 

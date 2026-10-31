@@ -17,17 +17,24 @@ public class PostPaymentRequestValidator : AbstractValidator<PostPaymentRequest>
             .WithMessage("Card number must contain only numeric characters.");
 
         RuleFor(request => request.ExpiryMonth)
+            .Cascade(CascadeMode.Stop)
+            .NotNull().WithMessage("Expiry month is required.")
             .InclusiveBetween(1, 12);
 
         RuleFor(request => request.ExpiryYear)
             .Cascade(CascadeMode.Stop)
-            .NotEmpty()
+            .NotNull().WithMessage("Expiry year is required.")
+            .InclusiveBetween(1, 9999);
+
+        RuleFor(request => request.ExpiryYear)
             .Must((request, year) =>
             {
                 var now = timeProvider.GetUtcNow();
                 return year > now.Year || (year == now.Year && request.ExpiryMonth > now.Month);
             })
-            .WithMessage("The combination of expiry month and year must be in the future.");
+            .WithMessage("The combination of expiry month and year must be in the future.")
+            .When(request => request.ExpiryMonth is >= 1 and <= 12
+                && request.ExpiryYear is >= 1 and <= 9999);
 
         RuleFor(request => request.Currency)
             .Cascade(CascadeMode.Stop)
@@ -38,7 +45,9 @@ public class PostPaymentRequestValidator : AbstractValidator<PostPaymentRequest>
 
         // The integer type enforces whole minor units; null distinguishes an omitted amount from zero.
         RuleFor(request => request.Amount)
-            .NotNull();
+            .Cascade(CascadeMode.Stop)
+            .NotNull().WithMessage("Amount is required.")
+            .GreaterThan(0).WithMessage("Amount must be greater than zero.");
 
         RuleFor(request => request.Cvv)
             .Cascade(CascadeMode.Stop)

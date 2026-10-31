@@ -3,10 +3,13 @@ using System.Text;
 using System.Text.Json;
 
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 
 using PaymentGateway.Api.Clients.Bank;
 using PaymentGateway.Api.Clients.Bank.Exceptions;
 using PaymentGateway.Api.Models;
+using PaymentGateway.Api.Tests.Unit.Logging;
 
 namespace PaymentGateway.Api.Tests.Unit.Clients;
 
@@ -37,7 +40,7 @@ public class BankClientTests
             return JsonResponse("""{"authorized":true,"authorization_code":"AUTH-123"}""");
         });
         var factory = new StubHttpClientFactory(handler);
-        IBankClient client = new BankClient(factory, CreateConfiguration(paymentsUrl));
+        IBankClient client = new BankClient(factory, CreateConfiguration(paymentsUrl), NullLogger<BankClient>.Instance);
 
         await client.ProcessPaymentAsync(request);
 
@@ -58,17 +61,24 @@ public class BankClientTests
         });
         using var handler = new StubHttpMessageHandler((_, _) =>
             Task.FromResult(JsonResponse(responseJson)));
-        IBankClient client = new BankClient(new StubHttpClientFactory(handler), CreateConfiguration());
+        var logger = new TestLogger<BankClient>();
+        IBankClient client = new BankClient(new StubHttpClientFactory(handler), CreateConfiguration(), logger);
 
         BankPaymentResponse response = await client.ProcessPaymentAsync(request);
 
         Assert.Equal(authorized, response.Authorized);
         Assert.Equal(authorizationCode, response.AuthorizationCode);
+        var entry = Assert.Single(logger.Entries);
+        Assert.Equal(LogLevel.Debug, entry.Level);
+        AssertBankLogProperties(entry, HttpStatusCode.OK);
+        Assert.DoesNotContain(request.CardNumber, entry.Message);
+        Assert.DoesNotContain(authorizationCode.Length > 0 ? authorizationCode : "AUTH-123", entry.Message);
     }
 
     [Theory]
     [InlineData("{}", "application/json")]
     [InlineData("Bank unavailable", "text/plain")]
+    [InlineData("PAN=2222405343240042; CVV=sensitive-cvv; expiry=04/2030; authorization=AUTH-SECRET", "text/plain")]
     public async Task ThrowsBankUnavailableExceptionWhenBankReturns503(string body, string contentType)
     {
         using var handler = new StubHttpMessageHandler((_, _) => Task.FromResult(
@@ -76,13 +86,26 @@ public class BankClientTests
             {
                 Content = new StringContent(body, Encoding.UTF8, contentType)
             }));
-        var client = new BankClient(new StubHttpClientFactory(handler), CreateConfiguration());
+        var logger = new TestLogger<BankClient>();
+        var client = new BankClient(new StubHttpClientFactory(handler), CreateConfiguration(), logger);
 
         var exception = await Assert.ThrowsAsync<BankUnavailableException>(() =>
             client.ProcessPaymentAsync(CreateRequest()));
 
         Assert.Equal("The bank is unavailable.", exception.Message);
         Assert.Equal(1, handler.RequestCount);
+        Assert.Equal(HttpStatusCode.ServiceUnavailable,
+            Assert.IsType<HttpRequestException>(exception.InnerException).StatusCode);
+        var entry = Assert.Single(logger.Entries);
+        Assert.Equal(LogLevel.Warning, entry.Level);
+        AssertBankLogProperties(entry, HttpStatusCode.ServiceUnavailable);
+        Assert.Equal("Unavailable", entry.Properties["FailureCategory"]);
+
+        // Even a failure body containing sensitive data must never be logged.
+        Assert.DoesNotContain("2222405343240042", entry.Message);
+        Assert.DoesNotContain("sensitive-cvv", entry.Message);
+        Assert.DoesNotContain("04/2030", entry.Message);
+        Assert.DoesNotContain("AUTH-SECRET", entry.Message);
     }
 
     [Theory]
@@ -95,13 +118,18 @@ public class BankClientTests
             {
                 Content = new StringContent("Bank unavailable", Encoding.UTF8, "text/plain")
             }));
-        var client = new BankClient(new StubHttpClientFactory(handler), CreateConfiguration());
+        var logger = new TestLogger<BankClient>();
+        var client = new BankClient(new StubHttpClientFactory(handler), CreateConfiguration(), logger);
 
         var exception = await Assert.ThrowsAsync<BankUnavailableException>(() =>
             client.ProcessPaymentAsync(CreateRequest()));
 
         Assert.Equal(statusCode, Assert.IsType<HttpRequestException>(exception.InnerException).StatusCode);
         Assert.Equal(1, handler.RequestCount);
+        var entry = Assert.Single(logger.Entries);
+        Assert.Equal(LogLevel.Error, entry.Level);
+        Assert.Equal("HttpError", entry.Properties["FailureCategory"]);
+        AssertBankLogProperties(entry, statusCode);
     }
 
     [Theory]
@@ -116,14 +144,22 @@ public class BankClientTests
     [InlineData("{\"authorized\":true,\"authorization_code\":null}")]
     [InlineData("{\"authorized\":true,\"authorization_code\":\"\"}")]
     [InlineData("{\"authorized\":true,\"authorization_code\":\"   \"}")]
+    [InlineData("{\"authorized\":\"PAN=2222405343240042; CVV=987; expiry=04/2030; AUTH-SECRET\"}")]
     public async Task RejectsMalformedSuccessfulBankResponses(string body)
     {
         using var handler = new StubHttpMessageHandler((_, _) =>
             Task.FromResult(JsonResponse(body)));
-        var client = new BankClient(new StubHttpClientFactory(handler), CreateConfiguration());
+        var logger = new TestLogger<BankClient>();
+        var client = new BankClient(new StubHttpClientFactory(handler), CreateConfiguration(), logger);
 
         await Assert.ThrowsAsync<BankUnavailableException>(() =>
             client.ProcessPaymentAsync(CreateRequest()));
+
+        var entry = Assert.Single(logger.Entries);
+        Assert.Equal(LogLevel.Error, entry.Level);
+        Assert.Equal("InvalidResponse", entry.Properties["FailureCategory"]);
+        AssertBankLogProperties(entry, HttpStatusCode.OK);
+        AssertNoSensitiveData(entry);
     }
 
     [Fact]
@@ -131,7 +167,7 @@ public class BankClientTests
     {
         using var handler = new StubHttpMessageHandler((_, _) =>
             Task.FromResult(JsonResponse("""{"authorized":false}""")));
-        var client = new BankClient(new StubHttpClientFactory(handler), CreateConfiguration());
+        var client = new BankClient(new StubHttpClientFactory(handler), CreateConfiguration(), NullLogger<BankClient>.Instance);
 
         var response = await client.ProcessPaymentAsync(CreateRequest());
 
@@ -139,20 +175,23 @@ public class BankClientTests
     }
 
     [Theory]
-    [InlineData("connection")]
-    [InlineData("read")]
-    [InlineData("timeout")]
-    public async Task WrapsCommunicationFailuresAndPreservesTheCause(string failureKind)
+    [InlineData("connection", "Network", LogLevel.Warning)]
+    [InlineData("read", "ReadError", LogLevel.Error)]
+    [InlineData("timeout", "Timeout", LogLevel.Warning)]
+    public async Task WrapsCommunicationFailuresAndPreservesTheCause(
+        string failureKind, string category, LogLevel level)
     {
+        const string sensitiveMessage = "PAN=2222405343240042; CVV=987; expiry=04/2030; AUTH-SECRET";
         Exception failure = failureKind switch
         {
-            "connection" => new HttpRequestException("Connection failed."),
-            "read" => new IOException("Response stream failed."),
-            _ => new TaskCanceledException("Bank timed out.", new TimeoutException())
+            "connection" => new HttpRequestException(sensitiveMessage),
+            "read" => new IOException(sensitiveMessage),
+            _ => new TaskCanceledException(sensitiveMessage, new TimeoutException())
         };
         using var handler = new StubHttpMessageHandler((_, _) =>
             Task.FromException<HttpResponseMessage>(failure));
-        var client = new BankClient(new StubHttpClientFactory(handler), CreateConfiguration());
+        var logger = new TestLogger<BankClient>();
+        var client = new BankClient(new StubHttpClientFactory(handler), CreateConfiguration(), logger);
         using var cancellation = new CancellationTokenSource();
 
         var exception = await Assert.ThrowsAsync<BankUnavailableException>(() =>
@@ -161,6 +200,11 @@ public class BankClientTests
         Assert.Same(failure, exception.InnerException);
         Assert.False(cancellation.IsCancellationRequested);
         Assert.Equal(1, handler.RequestCount);
+        var entry = Assert.Single(logger.Entries);
+        Assert.Equal(level, entry.Level);
+        Assert.Equal(category, entry.Properties["FailureCategory"]);
+        AssertBankLogProperties(entry, null);
+        AssertNoSensitiveData(entry);
     }
 
     [Fact]
@@ -173,10 +217,12 @@ public class BankClientTests
             cancellationToken.ThrowIfCancellationRequested();
             return Task.FromResult(JsonResponse("""{"authorized":true,"authorization_code":"AUTH-123"}"""));
         });
-        var client = new BankClient(new StubHttpClientFactory(handler), CreateConfiguration());
+        var logger = new TestLogger<BankClient>();
+        var client = new BankClient(new StubHttpClientFactory(handler), CreateConfiguration(), logger);
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
             client.ProcessPaymentAsync(CreateRequest(), cancellation.Token));
+        Assert.Empty(logger.Entries);
     }
 
     private static ProcessPaymentCommand CreateRequest(int expiryMonth = 4, int amount = 100) => new()
@@ -188,6 +234,23 @@ public class BankClientTests
         Amount = amount,
         Cvv = "123"
     };
+
+    private static void AssertBankLogProperties(LogEntry entry, HttpStatusCode? expectedStatus)
+    {
+        Assert.Null(entry.Exception);
+        Assert.Equal((int?)expectedStatus, entry.Properties["StatusCode"]);
+        Assert.True(Assert.IsType<long>(entry.Properties["DurationMs"]) >= 0);
+    }
+
+    private static void AssertNoSensitiveData(LogEntry entry)
+    {
+        var loggedText = entry.Message + string.Join(" ", entry.Properties.Values);
+        Assert.Null(entry.Exception);
+        Assert.DoesNotContain("2222405343240042", loggedText);
+        Assert.DoesNotContain("CVV=987", loggedText);
+        Assert.DoesNotContain("04/2030", loggedText);
+        Assert.DoesNotContain("AUTH-SECRET", loggedText);
+    }
 
     private static IConfiguration CreateConfiguration(string paymentsUrl = "http://localhost:8080/payments") =>
         new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>

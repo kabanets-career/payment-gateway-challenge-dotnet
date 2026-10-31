@@ -1,34 +1,58 @@
-# Instructions for candidates
+# Payment Gateway
 
-This is the .NET version of the Payment Gateway challenge. If you haven't already read this [README.md](https://github.com/cko-recruitment/) on the details of this exercise, please do so now.
+A minimal ASP.NET Core 8 API for validating and processing card payments through the supplied acquiring-bank simulator, and retrieving previous payment results.
 
-## Template structure
-```
-src/
-    PaymentGateway.Api - a skeleton ASP.NET Core Web API
-test/
-    PaymentGateway.Api.Tests.Unit - provider and request validator unit tests
-    PaymentGateway.Api.Tests.Integration - HTTP endpoint tests using WebApplicationFactory
-imposters/ - contains the bank simulator configuration. Don't change this
+## Getting started
 
-.editorconfig - don't change this. It ensures a consistent set of rules for submissions when reformatting code
-docker-compose.yml - configures the bank simulator
-PaymentGateway.sln
+**Requirements:** .NET 8 SDK and Docker with Compose.
+
+```bash
+docker compose up -d
+dotnet run --project src/PaymentGateway.Api --launch-profile PaymentGateway.Api
 ```
 
-Feel free to change the structure of the solution, use a different test library etc.
+Swagger is available at `https://localhost:7092/swagger` (development profile). The bank simulator runs at `http://localhost:8080`.
 
-## Running tests
+## API
 
-Run all tests:
+**POST `/api/Payments`** — validate and process a payment:
 
-```sh
-dotnet test PaymentGateway.sln
+```json
+{
+  "cardNumber": "2222405343248877",
+  "expiryMonth": 12,
+  "expiryYear": 2030,
+  "currency": "GBP",
+  "amount": 1050,
+  "cvv": "123"
+}
 ```
 
-Run unit tests or integration tests independently:
+- **201 Created:** Bank returned an authorization decision (`Authorized` or `Declined`), with a generated payment ID and safe card details.
+- **400 Bad Request:** Rejected by validation; no bank call and no payment stored.
+- **502 Bad Gateway:** Bank communication or response failure; authorization outcome is unknown and no payment is stored.
 
-```sh
-dotnet test test/PaymentGateway.Api.Tests.Unit/PaymentGateway.Api.Tests.Unit.csproj
-dotnet test test/PaymentGateway.Api.Tests.Integration/PaymentGateway.Api.Tests.Integration.csproj
+Payment outcomes are **Authorized** (bank approved; persisted), **Declined** (bank refused authorization; persisted), and **Rejected** (HTTP 400 validation failure; never persisted). A rejected request returns validation errors rather than a payment result.
+
+**GET `/api/Payments/{id}`** — return the stored payment (**200 OK**) or **404 Not Found**.
+
+The simulator authorizes cards ending in an odd digit, declines cards ending in an even nonzero digit, and returns 503 for cards ending in zero.
+
+## Tests
+
+```bash
+dotnet restore
+dotnet build PaymentGateway.sln --configuration Release
+dotnet test PaymentGateway.sln --configuration Release
 ```
+
+Unit tests cover validation, payment processing, safe logging and concurrency. HTTP integration tests cover API responses, persistence boundaries, malformed bank responses, and real connection failures and timeouts.
+
+## Design decisions and assumptions
+
+- **Separation of responsibilities:** Controller maps API requests, the service orchestrates processing and persistence, and `BankClient` handles the bank protocol.
+- **Validation assumptions:** Amount must be a positive integer in minor currency units (the brief leaves the permitted range undefined). Both expiry fields are required; month must be 1–12 and year 1–9999 to fit the bank's four-digit `MM/YYYY` format. Their combination must be strictly in the future; the current month is rejected, using UTC. Supported currencies are `GBP`, `USD`, and `EUR`.
+- **Storage and security:** A thread-safe in-memory repository stores payment results, including only the last four card digits—not the full card number or CVV. Data is lost on restart.
+- **Failure handling:** HTTP errors (including 503), network failures, timeouts and invalid or incomplete bank responses are not declines. Unknown authorization outcomes are never persisted as successful bank decisions. No automatic retries are performed. Caller cancellation propagates without being logged as a bank failure. Durable persistence, idempotency, and reconciliation would be needed in production.
+- **Bank configuration:** `Bank:PaymentsUrl` and `Bank:TimeoutSeconds` are validated at startup. The timeout defaults to 10 seconds in `appsettings.json`; override it with configuration or the `Bank__TimeoutSeconds` environment variable using a positive value.
+- **Observability:** Structured logging records payment outcomes and bank failures with trace correlation. Failure logs include category, HTTP status when available, and elapsed milliseconds; unavailability uses Warning and unexpected HTTP/protocol failures use Error. Logs exclude full card numbers, CVVs, expiry dates, authorization codes, bodies and bank exception text. Responses expose only the last four card digits alongside the required payment details.

@@ -31,7 +31,7 @@ public class PostPaymentRequestTests
 
     [Theory]
     [InlineData(100)]
-    [InlineData(0)]
+    [InlineData(1)]
     public void MapsAllFieldsToProcessPaymentCommand(int amount)
     {
         var request = new PostPaymentRequest
@@ -69,6 +69,20 @@ public class PostPaymentRequestTests
             Currency = currency,
             Amount = amount,
             Cvv = cvv
+        };
+
+        Assert.Throws<InvalidOperationException>(() => request.ToCommand());
+    }
+
+    [Theory]
+    [InlineData(null, 2030)]
+    [InlineData(4, null)]
+    public void ThrowsWhenExpiryFieldIsMissing(int? month, int? year)
+    {
+        var request = new PostPaymentRequest
+        {
+            CardNumber = "2222405343248877", ExpiryMonth = month, ExpiryYear = year,
+            Currency = "GBP", Amount = 100, Cvv = "123"
         };
 
         Assert.Throws<InvalidOperationException>(() => request.ToCommand());
