@@ -12,14 +12,14 @@ namespace PaymentGateway.Api.Controllers;
 [ApiController]
 public class PaymentsController : Controller
 {
-    private readonly PaymentsRepository _paymentsRepository;
+    private readonly IPaymentService _paymentService;
     private readonly IValidator<PostPaymentRequest> _postPaymentRequestValidator;
 
     public PaymentsController(
-        PaymentsRepository paymentsRepository,
+        IPaymentService paymentService,
         IValidator<PostPaymentRequest> postPaymentRequestValidator)
     {
-        _paymentsRepository = paymentsRepository;
+        _paymentService = paymentService;
         _postPaymentRequestValidator = postPaymentRequestValidator;
     }
 
@@ -46,10 +46,12 @@ public class PaymentsController : Controller
     }
 
     [HttpGet("{id:guid}")]
-    public async Task<ActionResult<PostPaymentResponse?>> GetPaymentAsync(Guid id)
+    [ProducesResponseType(typeof(GetPaymentResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public ActionResult<GetPaymentResponse> GetPayment(Guid id)
     {
-        var payment = _paymentsRepository.Get(id);
+        var payment = _paymentService.Get(id);
 
-        return new OkObjectResult(payment);
+        return payment is null ? NotFound() : Ok(GetPaymentResponse.ToResponse(payment));
     }
 }

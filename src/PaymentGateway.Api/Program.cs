@@ -2,6 +2,7 @@ using FluentValidation;
 
 using PaymentGateway.Api.Models.Requests;
 using PaymentGateway.Api.Providers;
+using PaymentGateway.Api.Repositories;
 using PaymentGateway.Api.Services;
 using PaymentGateway.Api.Validators;
 
@@ -14,7 +15,8 @@ builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
-builder.Services.AddSingleton<PaymentsRepository>();
+builder.Services.AddSingleton<IPaymentsRepository, PaymentsRepository>();
+builder.Services.AddScoped<IPaymentService, PaymentService>();
 builder.Services.AddSingleton<TimeProvider>(TimeProvider.System);
 builder.Services.AddSingleton<ICurrencyProvider, CurrencyProvider>();
 builder.Services.AddScoped<IValidator<PostPaymentRequest>, PostPaymentRequestValidator>();

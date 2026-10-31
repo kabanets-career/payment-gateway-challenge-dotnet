@@ -6,7 +6,9 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.DependencyInjection;
 
 using PaymentGateway.Api.Controllers;
+using PaymentGateway.Api.Models;
 using PaymentGateway.Api.Models.Requests;
+using PaymentGateway.Api.Models.Responses;
 using PaymentGateway.Api.Services;
 
 namespace PaymentGateway.Api.Tests.Unit.Controllers;
@@ -27,7 +29,7 @@ public class PaymentsControllerTests
             new ValidationFailure(nameof(PostPaymentRequest.CardNumber), "Another card number error."),
             new ValidationFailure(nameof(PostPaymentRequest.Currency), "Currency is unsupported.")
         }));
-        var controller = new PaymentsController(new PaymentsRepository(), validator)
+        var controller = new PaymentsController(new StubPaymentService(), validator)
         {
             ControllerContext = new ControllerContext
             {
@@ -54,13 +56,77 @@ public class PaymentsControllerTests
     {
         var request = new PostPaymentRequest();
         var validator = new StubValidator(new ValidationResult());
-        var controller = new PaymentsController(new PaymentsRepository(), validator);
+        var controller = new PaymentsController(new StubPaymentService(), validator);
 
         var result = await controller.PostPaymentAsync(request, CancellationToken.None);
 
         var noContent = Assert.IsType<NoContentResult>(result);
         Assert.Equal(StatusCodes.Status204NoContent, noContent.StatusCode);
         Assert.Same(request, validator.ValidatedRequest);
+    }
+
+    [Fact]
+    public void ReturnsOkWithPaymentWhenPaymentExists()
+    {
+        var payment = new Payment
+        {
+            Id = Guid.NewGuid(),
+            Status = PaymentStatus.Authorized,
+            AuthorizationCode = "AUTH-123",
+            CardNumberLastFour = "0042",
+            ExpiryMonth = 9,
+            ExpiryYear = 2030,
+            Currency = "GBP",
+            Amount = 1050
+        };
+        var service = new StubPaymentService(payment);
+        var controller = new PaymentsController(service, new StubValidator(new ValidationResult()));
+
+        var result = controller.GetPayment(payment.Id);
+
+        var ok = Assert.IsType<OkObjectResult>(result.Result);
+        Assert.Equal(StatusCodes.Status200OK, ok.StatusCode);
+        var response = Assert.IsType<GetPaymentResponse>(ok.Value);
+        Assert.Equal(payment.Id, response.Id);
+        Assert.Equal(payment.Status, response.Status);
+        Assert.Equal(payment.CardNumberLastFour, response.CardNumberLastFour);
+        Assert.Equal(payment.ExpiryMonth, response.ExpiryMonth);
+        Assert.Equal(payment.ExpiryYear, response.ExpiryYear);
+        Assert.Equal(payment.Currency, response.Currency);
+        Assert.Equal(payment.Amount, response.Amount);
+        Assert.Equal(payment.Id, service.RequestedId);
+    }
+
+    [Fact]
+    public void ReturnsNotFoundWhenPaymentDoesNotExist()
+    {
+        var id = Guid.NewGuid();
+        var service = new StubPaymentService();
+        var controller = new PaymentsController(service, new StubValidator(new ValidationResult()));
+
+        var result = controller.GetPayment(id);
+
+        var notFound = Assert.IsType<NotFoundResult>(result.Result);
+        Assert.Equal(StatusCodes.Status404NotFound, notFound.StatusCode);
+        Assert.Equal(id, service.RequestedId);
+    }
+
+    private sealed class StubPaymentService : IPaymentService
+    {
+        private readonly Payment? _payment;
+
+        public StubPaymentService(Payment? payment = null)
+        {
+            _payment = payment;
+        }
+
+        public Guid? RequestedId { get; private set; }
+
+        public Payment? Get(Guid id)
+        {
+            RequestedId = id;
+            return _payment;
+        }
     }
 
     private sealed class StubValidator : AbstractValidator<PostPaymentRequest>
